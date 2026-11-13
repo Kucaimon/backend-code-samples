@@ -1,0 +1,323 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum AuthProvider {
+  PASSWORD
+  GOOGLE
+  FACEBOOK
+  APPLE
+}
+
+enum CatalogTier {
+  FREE
+  PREMIUM
+}
+
+enum BillingProvider {
+  CREEM
+  YOOKASSA
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+enum PlanInterval {
+  WEEK
+  MONTH
+  YEAR
+  // Added to represent the client-approved one-time Lifetime plan.
+  // API v0.4 must be amended because it only defines week/month/year.
+  LIFETIME
+}
+
+enum FreeTrialFeature {
+  GALLERY
+  CAMERA
+  CONVERTER
+  CATALOGS
+}
+
+enum EmailTokenType {
+  VERIFY_EMAIL
+  RESET_PASSWORD
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  CANCELED
+  FAILED
+  REFUNDED
+}
+
+enum PaymentPurpose {
+  CHECKOUT
+  RENEWAL
+  RETRY
+}
+
+model User {
+  id            String         @id @default(uuid()) @db.Uuid
+  email         String         @unique @db.VarChar(320)
+  emailVerified Boolean        @default(false)
+  locale        String         @default("en") @db.VarChar(12)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  identities    AuthIdentity[]
+  palettes      Palette[]
+  savedColors   SavedColor[]
+  subscription  Subscription?
+  refreshTokens RefreshToken[]
+  emailTokens   EmailActionToken[]
+  payments      Payment[]
+  freeTrials    FreeTrial[]
+
+  @@index([createdAt])
+}
+
+model AuthIdentity {
+  id             String       @id @default(uuid()) @db.Uuid
+  userId         String       @db.Uuid
+  provider       AuthProvider
+  providerUserId String?      @db.VarChar(255)
+  passwordHash   String?      @db.VarChar(255)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, provider])
+  @@unique([provider, providerUserId])
+  @@index([userId])
+}
+
+model Palette {
+  id        String      @id @default(uuid()) @db.Uuid
+  userId    String      @db.Uuid
+  name      String      @db.VarChar(60)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  colors    ColorItem[]
+
+  @@index([userId, updatedAt(sort: Desc)])
+}
+
+model ColorItem {
+  id              String   @id @default(uuid()) @db.Uuid
+  paletteId       String   @db.Uuid
+  name            String   @default("") @db.VarChar(40)
+  hex             String   @db.VarChar(7)
+  alpha           Float    @default(1.0)
+  position        Int
+  sourceCatalogId String?  @db.VarChar(100)
+  sourceCode      String?  @db.VarChar(100)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  palette         Palette  @relation(fields: [paletteId], references: [id], onDelete: Cascade)
+
+  @@unique([paletteId, position])
+  @@index([paletteId])
+  @@index([sourceCatalogId, sourceCode])
+}
+
+model SavedColor {
+  id              String   @id @default(uuid()) @db.Uuid
+  userId          String   @db.Uuid
+  hex             String   @db.VarChar(7)
+  alpha           Float    @default(1.0)
+  name            String   @default("") @db.VarChar(40)
+  sourceCatalogId String?  @db.VarChar(100)
+  sourceCode      String?  @db.VarChar(100)
+  dedupeKey       String   @db.VarChar(512)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model Catalog {
+  id           String        @id @db.VarChar(100)
+  name         String        @db.VarChar(200)
+  manufacturer String        @db.VarChar(200)
+  tier         CatalogTier   @default(FREE)
+  version      Int           @default(1)
+  updatedAt    DateTime      @updatedAt
+  contentHash  String?       @db.VarChar(64)
+  colors       CatalogColor[]
+}
+
+model CatalogColor {
+  catalogId String   @db.VarChar(100)
+  code      String   @db.VarChar(100)
+  names     Json
+  hex       String   @db.VarChar(7)
+  labL      Float
+  labA      Float
+  labB      Float
+  catalog   Catalog  @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+
+  @@id([catalogId, code])
+  @@index([catalogId, hex])
+}
+
+model Plan {
+  id             String       @id @db.VarChar(100)
+  names          Json
+  features       Json
+  interval       PlanInterval
+  trialDays      Int          @default(0)
+  priceUsd       Int
+  priceRub       Int?
+  creemProductId String?      @db.VarChar(255)
+  isRecurring    Boolean      @default(true)
+  isActive       Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  subscriptions Subscription[]
+  payments       Payment[]
+}
+
+model Subscription {
+  id                  String             @id @default(uuid()) @db.Uuid
+  userId              String             @unique @db.Uuid
+  provider            BillingProvider
+  planId              String             @db.VarChar(100)
+  status              SubscriptionStatus
+  trialEnd            DateTime?
+  // Nullable for Lifetime access; API contract v0.4 currently treats this as required.
+  currentPeriodEnd    DateTime?
+  cancelAtPeriodEnd   Boolean            @default(false)
+  // For YooKassa, providerRef is the saved payment_method.id. These non-secret fields
+  // let the account page identify the saved card without exposing that provider ID.
+  providerRef               String?   @db.VarChar(255)
+  paymentMethodType         String?   @db.VarChar(40)
+  paymentMethodCardType     String?   @db.VarChar(40)
+  paymentMethodLast4        String?   @db.VarChar(4)
+  paymentMethodExpiryMonth  String?   @db.VarChar(2)
+  paymentMethodExpiryYear   String?   @db.VarChar(4)
+  // Compare-and-swap guard shared by the renewal worker, resume, and unlink.
+  paymentMethodRevision     Int       @default(0)
+  providerCustomerRef       String?   @db.VarChar(255)
+  autoRenewConsentAt        DateTime?
+  autoRenewConsentText      String?   @db.Text
+  retryCount          Int                @default(0)
+  nextRetryAt         DateTime?
+  trialReminderSentAt DateTime?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+  user                User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan                Plan               @relation(fields: [planId], references: [id], onDelete: Restrict)
+  payments            Payment[]
+
+  @@index([provider, status, currentPeriodEnd])
+  @@index([providerRef])
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @db.Uuid
+  tokenHash  String    @unique @db.VarChar(255)
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  replacedBy String?   @db.Uuid
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model EmailActionToken {
+  id        String          @id @default(uuid()) @db.Uuid
+  userId    String          @db.Uuid
+  type      EmailTokenType
+  tokenHash String          @unique @db.VarChar(255)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime        @default(now())
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type, expiresAt])
+}
+
+model Payment {
+  id                String          @id @default(uuid()) @db.Uuid
+  userId            String          @db.Uuid
+  subscriptionId    String?         @db.Uuid
+  planId            String          @db.VarChar(100)
+  provider          BillingProvider
+  providerPaymentId String?         @db.VarChar(255)
+  providerOrderRef String?           @db.VarChar(255)
+  providerTransactionRef String?    @db.VarChar(255)
+  checkoutUrl       String?         @db.VarChar(2048)
+  providerCustomerRef String?       @db.VarChar(255)
+  amount            Int
+  currency          String          @db.VarChar(3)
+  status            PaymentStatus   @default(PENDING)
+  purpose           PaymentPurpose  @default(CHECKOUT)
+  autoRenewConsentAt DateTime?
+  autoRenewConsentText String?      @db.Text
+  idempotencyKey    String?         @unique @db.VarChar(255)
+  // Set when a pending checkout expired or was replaced; see BillingService.expireStaleCheckouts.
+  supersededAt      DateTime?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subscription      Subscription?   @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  plan              Plan            @relation(fields: [planId], references: [id], onDelete: Restrict)
+
+  @@unique([provider, providerPaymentId])
+  @@unique([provider, providerOrderRef])
+  @@unique([provider, providerTransactionRef])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([provider, status])
+}
+
+model OAuthAttempt {
+  id          String       @id @default(uuid()) @db.Uuid
+  provider    AuthProvider
+  stateHash   String       @unique @db.VarChar(255)
+  codeVerifier String      @db.VarChar(255)
+  nonce       String       @db.VarChar(255)
+  redirectTo  String       @db.VarChar(512)
+  expiresAt   DateTime
+  createdAt   DateTime     @default(now())
+
+  @@index([provider, expiresAt])
+}
+
+model PaymentEvent {
+  id              String          @id @default(uuid()) @db.Uuid
+  provider        BillingProvider
+  providerEventId String          @db.VarChar(255)
+  eventType       String          @db.VarChar(255)
+  rawPayload      Json
+  receivedAt      DateTime        @default(now())
+  processedAt     DateTime?
+  processingAt    DateTime?
+  processingError String?         @db.Text
+
+  @@unique([provider, providerEventId])
+  @@index([processedAt, receivedAt])
+}
+
+/// One short free trial per user and feature; startedAt is set once by the first request.
+model FreeTrial {
+  userId    String           @db.Uuid
+  feature   FreeTrialFeature
+  startedAt DateTime         @default(now())
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, feature])
+}
